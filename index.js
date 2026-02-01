@@ -256,6 +256,7 @@ function buildSearchCriteria(receivedAfter, receivedBefore) {
   
   if (receivedAfter) {
     const afterDate = new Date(receivedAfter);
+    // IMAP SINCE uses format: DD-MMM-YYYY
     const sinceStr = formatImapDate(afterDate);
     criteria.push(['SINCE', sinceStr]);
     console.log(`Adding SINCE: ${sinceStr}`);
@@ -263,6 +264,7 @@ function buildSearchCriteria(receivedAfter, receivedBefore) {
   
   if (receivedBefore) {
     const beforeDate = new Date(receivedBefore);
+    // Add 1 day because BEFORE is exclusive
     beforeDate.setDate(beforeDate.getDate() + 1);
     const beforeStr = formatImapDate(beforeDate);
     criteria.push(['BEFORE', beforeStr]);
@@ -289,6 +291,7 @@ function parseEmailData(emailData) {
     const subject = headers.subject?.[0] || '(Sin asunto)';
     const dateHeader = headers.date?.[0] || emailData.date;
     
+    // Parse from header
     let fromName = '';
     let fromEmail = '';
     const fromMatch = fromHeader.match(/^(?:"?([^"]*)"?\s*)?<?([^>]+@[^>]+)>?$/);
@@ -299,15 +302,19 @@ function parseEmailData(emailData) {
       fromEmail = fromHeader;
     }
 
+    // Check for attachments in structure
     const hasAttachments = checkForAttachments(emailData.struct);
 
+    // Create snippet from text preview
     let snippet = emailData.textPreview || '';
+    // Clean up the snippet
     snippet = snippet
-      .replace(/<[^>]*>/g, '')
-      .replace(/\s+/g, ' ')
+      .replace(/<[^>]*>/g, '') // Remove HTML tags
+      .replace(/\s+/g, ' ')    // Normalize whitespace
       .trim()
       .substring(0, 200);
 
+    // Detect possible invoice
     const isPossibleInvoice = detectPossibleInvoice(subject, snippet, fromEmail, hasAttachments);
 
     return {
@@ -358,14 +365,17 @@ function detectPossibleInvoice(subject, snippet, fromEmail, hasAttachments) {
   
   const combinedText = `${subject} ${snippet} ${fromEmail}`.toLowerCase();
   
+  // Higher chance if has attachments and keywords
   if (hasAttachments) {
     return invoiceKeywords.some(keyword => combinedText.includes(keyword));
   }
   
+  // Check for PDF attachment indicators
   if (combinedText.includes('.pdf') || combinedText.includes('adjunto')) {
     return invoiceKeywords.some(keyword => combinedText.includes(keyword));
   }
   
+  // Strong keywords that indicate invoice even without attachment
   const strongKeywords = ['factura', 'invoice', 'recibo', 'receipt'];
   return strongKeywords.some(keyword => combinedText.includes(keyword));
 }
@@ -383,6 +393,7 @@ function fetchAttachments(email, appPassword, messageUids) {
           return reject(err);
         }
 
+        // Convert message UIDs from format "<UID@yahoo.imap>" to numeric UIDs
         const numericUids = messageUids.map(uid => {
           const match = uid.match(/<(\d+)@/);
           return match ? parseInt(match[1], 10) : null;
@@ -395,10 +406,13 @@ function fetchAttachments(email, appPassword, messageUids) {
 
         console.log(`Looking for UIDs: ${numericUids.join(', ')}`);
 
+        // CRITICAL: Use UID-based fetch (third parameter = true means use UID)
+        // The imap library's fetch() method defaults to sequence numbers, not UIDs
+        // We must pass 'true' as third parameter to fetch by UID
         const fetch = imap.fetch(numericUids, {
           bodies: '',
           struct: true
-        });
+        }, true);  // <-- This 'true' tells imap to use UIDs instead of sequence numbers
 
         let pendingMessages = numericUids.length;
 
@@ -424,6 +438,7 @@ function fetchAttachments(email, appPassword, messageUids) {
 
           msg.once('end', async () => {
             try {
+              // Parse the full message
               const parsed = await simpleParser(buffer);
               
               const messageResult = {
@@ -436,8 +451,10 @@ function fetchAttachments(email, appPassword, messageUids) {
                 attachments: []
               };
 
+              // Process attachments
               if (parsed.attachments && parsed.attachments.length > 0) {
                 for (const att of parsed.attachments) {
+                  // Only include PDFs and images for invoice processing
                   const isPdf = att.contentType === 'application/pdf' || 
                                 att.filename?.toLowerCase().endsWith('.pdf');
                   const isImage = att.contentType?.startsWith('image/');
@@ -447,6 +464,7 @@ function fetchAttachments(email, appPassword, messageUids) {
                       filename: att.filename || 'attachment',
                       contentType: att.contentType,
                       size: att.size,
+                      // Base64 encode the content
                       content: att.content.toString('base64')
                     });
                     console.log(`Found attachment: ${att.filename} (${att.contentType}, ${att.size} bytes)`);
@@ -473,6 +491,7 @@ function fetchAttachments(email, appPassword, messageUids) {
         });
 
         fetch.once('end', () => {
+          // Wait a bit for all parsing to complete
           setTimeout(() => {
             if (pendingMessages > 0) {
               console.log(`Still waiting for ${pendingMessages} messages to parse...`);
@@ -499,3 +518,4 @@ app.listen(PORT, () => {
   console.log(`Yahoo IMAP Server running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/health`);
 });
+
