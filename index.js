@@ -343,8 +343,29 @@ function checkForAttachments(struct) {
     for (const part of parts) {
       if (Array.isArray(part)) {
         if (check(part)) return true;
-      } else if (typeof part === 'object' && part.disposition) {
-        if (part.disposition.type?.toLowerCase() === 'attachment') {
+      } else if (typeof part === 'object') {
+        // Check for explicit attachment disposition
+        if (part.disposition?.type?.toLowerCase() === 'attachment') {
+          return true;
+        }
+        // Check for inline disposition (some PDFs come this way)
+        if (part.disposition?.type?.toLowerCase() === 'inline') {
+          const type = part.type?.toLowerCase();
+          const subtype = part.subtype?.toLowerCase();
+          // PDFs or images as inline are still attachments we want
+          if (type === 'application' && subtype === 'pdf') return true;
+          if (type === 'image') return true;
+        }
+        // Check for PDF content type directly (even without disposition)
+        const type = part.type?.toLowerCase();
+        const subtype = part.subtype?.toLowerCase();
+        if (type === 'application' && subtype === 'pdf') {
+          return true;
+        }
+        // Check filename in disposition params (some emails use this)
+        const filename = part.disposition?.params?.filename || 
+                         part.params?.name || '';
+        if (filename.toLowerCase().endsWith('.pdf')) {
           return true;
         }
       }
@@ -357,26 +378,94 @@ function checkForAttachments(struct) {
 
 // Helper: Detect if email might contain an invoice
 function detectPossibleInvoice(subject, snippet, fromEmail, hasAttachments) {
-  const invoiceKeywords = [
-    'factura', 'invoice', 'recibo', 'receipt', 'pago', 'payment',
-    'cobro', 'cargo', 'importe', 'total', 'iva', 'vat', 'tax',
-    'pedido', 'order', 'compra', 'purchase', 'suscripción', 'subscription'
-  ];
-  
+  const emailLower = fromEmail.toLowerCase();
+  const subjectLower = subject.toLowerCase();
   const combinedText = `${subject} ${snippet} ${fromEmail}`.toLowerCase();
   
-  // Higher chance if has attachments and keywords
+  // Known invoice providers - always mark as possible invoice
+  const knownProviders = [
+    // Tech & Cloud
+    'apple.com', 'email.apple.com', 'itunes.com',
+    'netflix.com', 'members.netflix.com',
+    'amazon.com', 'amazon.es', 'aws.amazon.com',
+    'google.com', 'payments.google.com',
+    'microsoft.com', 'azure.com',
+    'spotify.com', 'spotify.net',
+    'dropbox.com', 'adobe.com',
+    'github.com', 'digitalocean.com', 'heroku.com',
+    'vercel.com', 'netlify.com', 'railway.app',
+    'openai.com', 'anthropic.com',
+    // Telecom & Utilities
+    'movistar.es', 'vodafone.es', 'orange.es',
+    'pepephone.com', 'o2online.es', 'yoigo.com',
+    'masmovil.es', 'lowi.es', 'simyo.es',
+    'iberdrola.es', 'naturgy.es', 'endesa.es',
+    'repsol.com', 'cepsa.es',
+    // Banks & Finance
+    'ing.es', 'bancosantander.es', 'bbva.es',
+    'caixabank.es', 'sabadell.es', 'bankinter.com',
+    'indexacapital.com', 'myinvestor.es',
+    'mutuactivos.com', 'paypal.com', 'stripe.com',
+    // Insurance
+    'mapfre.es', 'axa.es', 'allianz.es',
+    'sanitas.es', 'asisa.es', 'dkv.es', 'adt.com.es',
+    // E-commerce & Retail
+    'elcorteingles.es', 'mc.elcorteingles.es',
+    'zara.com', 'pccomponentes.com', 'mediamarkt.es',
+    'aliexpress.com', 'shein.com',
+    // Transport
+    'renfe.com', 'iberia.com', 'vueling.com',
+    'ryanair.com', 'blablacar.es', 'uber.com', 'cabify.es',
+    // Food & Delivery
+    'glovo.com', 'just-eat.es', 'deliveroo.es',
+    'telepizza.es', 'dominos.es',
+    // Subscriptions & Services
+    'hbomax.com', 'disneyplus.com', 'primevideo.com',
+    'youtube.com', 'twitch.tv',
+    'vivaticket.com', 'proticketing.com', 'ticketmaster.es',
+    // Software as provider domain patterns
+    'timp.pro', 'propulsia', 'fisiohand'
+  ];
+  
+  // Check if from a known provider
+  const isKnownProvider = knownProviders.some(provider => emailLower.includes(provider));
+  if (isKnownProvider) {
+    return true;
+  }
+  
+  // Extended invoice keywords
+  const invoiceKeywords = [
+    // Spanish
+    'factura', 'recibo', 'pago', 'cobro', 'cargo', 'importe', 
+    'total', 'iva', 'pedido', 'compra', 'suscripción', 'cuota',
+    'renovación', 'cargo mensual', 'cargo anual', 'confirmación de pago',
+    'resumen de cuenta', 'estado de cuenta', 'extracto', 'liquidación',
+    'abono', 'adeudo', 'domiciliación', 'justificante',
+    // English
+    'invoice', 'receipt', 'payment', 'billing', 'statement',
+    'subscription', 'order', 'purchase', 'charge', 'transaction',
+    'monthly charge', 'annual charge', 'payment confirmation',
+    'your bill', 'payment received', 'payment processed'
+  ];
+  
+  // Strong keywords that indicate invoice even without attachment
+  const strongKeywords = [
+    'factura', 'invoice', 'recibo', 'receipt', 'tu factura', 
+    'your invoice', 'your receipt', 'tu recibo', 'payment confirmation',
+    'confirmación de pago', 'cargo en tu cuenta', 'hemos cobrado'
+  ];
+  
+  // If has attachments and any keyword matches
   if (hasAttachments) {
     return invoiceKeywords.some(keyword => combinedText.includes(keyword));
   }
   
   // Check for PDF attachment indicators
-  if (combinedText.includes('.pdf') || combinedText.includes('adjunto')) {
+  if (combinedText.includes('.pdf') || combinedText.includes('adjunto') || combinedText.includes('attached')) {
     return invoiceKeywords.some(keyword => combinedText.includes(keyword));
   }
   
-  // Strong keywords that indicate invoice even without attachment
-  const strongKeywords = ['factura', 'invoice', 'recibo', 'receipt'];
+  // Strong keywords work even without attachments
   return strongKeywords.some(keyword => combinedText.includes(keyword));
 }
 
@@ -453,7 +542,10 @@ function fetchAttachments(email, appPassword, messageUids) {
 
               // Process attachments
               if (parsed.attachments && parsed.attachments.length > 0) {
+                console.log(`Message ${messageUid} has ${parsed.attachments.length} attachments from mailparser`);
                 for (const att of parsed.attachments) {
+                  console.log(`  - Attachment: ${att.filename}, type: ${att.contentType}, size: ${att.size}, disposition: ${att.contentDisposition}`);
+                  
                   // Only include PDFs and images for invoice processing
                   const isPdf = att.contentType === 'application/pdf' || 
                                 att.filename?.toLowerCase().endsWith('.pdf');
@@ -467,9 +559,11 @@ function fetchAttachments(email, appPassword, messageUids) {
                       // Base64 encode the content
                       content: att.content.toString('base64')
                     });
-                    console.log(`Found attachment: ${att.filename} (${att.contentType}, ${att.size} bytes)`);
+                    console.log(`    -> Added to results: ${att.filename} (${att.contentType}, ${att.size} bytes)`);
                   }
                 }
+              } else {
+                console.log(`Message ${messageUid} has no attachments from mailparser`);
               }
 
               results.push(messageResult);
@@ -518,4 +612,5 @@ app.listen(PORT, () => {
   console.log(`Yahoo IMAP Server running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/health`);
 });
+
 
